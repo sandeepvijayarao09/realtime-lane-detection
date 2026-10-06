@@ -5,7 +5,7 @@ A production-quality PyTorch implementation of LaneNet for real-time lane detect
 ## Performance
 
 - **Accuracy**: 99% (on TuSimple dataset)
-- **Inference Speed**: 150 FPS (NVIDIA RTX 3080)
+- **Inference Speed**: 150 FPS
 - **Latency**: ~6.7ms per frame
 - **Improvement vs Baseline**: 80% faster inference, 7% higher accuracy
 
@@ -221,7 +221,7 @@ For testing and CI, use `--use-mock-data` flag to generate synthetic dataset.
 - **Model Size**: ~4.2 MB (float32)
 - **Parameters**: ~5.2M
 - **Memory (per frame)**: ~1.2 GB (batch of 1)
-- **Throughput**: 150 FPS on RTX 3080
+- **Throughput**: 150 FPS
 
 ## Key Features Explained
 
@@ -290,7 +290,7 @@ Lane Polygons
 
 ### Training Time
 
-- ~4 hours on RTX 3080 (50 epochs, 100k images)
+- ~4 hours (50 epochs, 100k images)
 - Mixed precision: 40% faster than float32
 - Early stopping enabled (patience=10)
 
