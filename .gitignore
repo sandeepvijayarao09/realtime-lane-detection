@@ -75,3 +75,9 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+
+# Committed figures and measured results
+!assets/
+!assets/*.png
+!results/
+!results/*.json

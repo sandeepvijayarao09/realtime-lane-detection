@@ -1,0 +1,26 @@
+{
+  "hardware": {
+    "cpu": "Apple M5 Pro",
+    "os": "Darwin 25.6.0",
+    "torch": "2.14.1",
+    "torch_threads": 1
+  },
+  "input": "1x3x384x640",
+  "runs": 30,
+  "models": [
+    {
+      "backbone": "efficientnet",
+      "params_millions": 5.85,
+      "median_ms": 138.0,
+      "p90_ms": 138.4,
+      "fps_at_median": 7.2
+    },
+    {
+      "backbone": "mobilenet",
+      "params_millions": 4.02,
+      "median_ms": 88.5,
+      "p90_ms": 90.3,
+      "fps_at_median": 11.3
+    }
+  ]
+}
