@@ -12,7 +12,8 @@ from src.inference import LaneInferenceEngine, VideoInferenceEngine
 from src.metrics import PerformanceProfiler
 
 
-def process_image(engine: LaneInferenceEngine, image_path: str, output_path: str = None) -> None:
+def process_image(engine: LaneInferenceEngine, image_path: str, output_path: str = None,
+                  display: bool = True) -> None:
     """Process single image."""
     print(f"Processing image: {image_path}")
 
@@ -34,17 +35,17 @@ def process_image(engine: LaneInferenceEngine, image_path: str, output_path: str
         cv2.putText(output_image, f"FPS: {fps:.1f}", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    # Display
-    cv2.imshow('Lane Detection Result', output_image)
-
     # Save if output path specified
     if output_path:
         cv2.imwrite(output_path, output_image)
         print(f"Saved output to {output_path}")
 
     print(f"Detected {len(lanes)} lanes")
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+
+    if display:
+        cv2.imshow('Lane Detection Result', output_image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
 
 def process_video(engine: LaneInferenceEngine, video_path: str, output_path: str = None) -> None:
@@ -132,7 +133,8 @@ def main():
     parser.add_argument('--model', type=str, help='Path to model checkpoint')
 
     # Inference options
-    parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
+    parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu, falls back to cpu)')
+    parser.add_argument('--no-display', action='store_true', help='Do not open a window (image mode)')
     parser.add_argument('--backbone', type=str, default='efficientnet', help='Backbone (efficientnet/mobilenet)')
     parser.add_argument('--duration', type=int, default=30, help='Webcam duration in seconds')
 
@@ -143,12 +145,13 @@ def main():
     engine = LaneInferenceEngine(
         model_path=args.model,
         device=args.device,
-        use_torchscript=False
+        use_torchscript=False,
+        backbone=args.backbone,
     )
 
     # Process input
     if args.image:
-        process_image(engine, args.image, args.output)
+        process_image(engine, args.image, args.output, display=not args.no_display)
     elif args.video:
         process_video(engine, args.video, args.output)
     elif args.webcam:

@@ -16,21 +16,23 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import time
 
-from model import create_lanenet
-from postprocess import LanePostProcessor, RealTimeLaneProcessor
-from metrics import PerformanceProfiler
+from .model import create_lanenet
+from .postprocess import LanePostProcessor, RealTimeLaneProcessor
+from .metrics import PerformanceProfiler
 
 
 class LaneInferenceEngine:
     """Inference engine for lane detection."""
 
     def __init__(self, model_path: Optional[str] = None, device: str = 'cuda',
-                 use_torchscript: bool = False):
+                 use_torchscript: bool = False, backbone: str = 'efficientnet'):
         """
         Args:
-            model_path: Path to model checkpoint
-            device: Device to run inference on
+            model_path: Path to model checkpoint. Without one the decoder is
+                randomly initialised and the output is meaningless.
+            device: Device to run inference on (falls back to CPU)
             use_torchscript: Use TorchScript model
+            backbone: 'efficientnet' or 'mobilenet' (must match the checkpoint)
         """
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.use_torchscript = use_torchscript
@@ -38,9 +40,12 @@ class LaneInferenceEngine:
         if use_torchscript and model_path and model_path.endswith('.pt'):
             self.model = torch.jit.load(model_path, map_location=self.device)
         else:
-            self.model = create_lanenet(backbone='efficientnet', pretrained=False)
+            self.model = create_lanenet(backbone=backbone, pretrained=False)
             if model_path:
                 self._load_checkpoint(model_path)
+            else:
+                print("Warning: no checkpoint given; LaneNet weights are random, "
+                      "so detected lanes are meaningless.")
             self.model = self.model.to(self.device)
 
         self.model.eval()
@@ -54,7 +59,7 @@ class LaneInferenceEngine:
 
     def _load_checkpoint(self, checkpoint_path: str) -> None:
         """Load model checkpoint."""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
             self.model.load_state_dict(checkpoint['model_state_dict'])
         else:
@@ -99,7 +104,9 @@ class LaneInferenceEngine:
 
         # Normalize
         image = image.astype(np.float32) / 255.0
-        image = (image - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        image = (image - mean) / std
 
         # To tensor
         image = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0)
@@ -356,7 +363,7 @@ class VideoInferenceEngine:
 
 
 if __name__ == '__main__':
-    # Test inference engine
+    # Smoke test (random weights, random input: checks shapes and timing only)
     print("Testing LaneInferenceEngine...")
 
     engine = LaneInferenceEngine(device='cpu')
@@ -376,4 +383,4 @@ if __name__ == '__main__':
         lanes = engine.detect_lanes(test_image)
     engine.profiler.print_summary()
 
-    print("All tests passed!")
+    print("Done.")

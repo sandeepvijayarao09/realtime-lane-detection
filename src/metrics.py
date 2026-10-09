@@ -1,7 +1,9 @@
 """
 Evaluation metrics for lane detection.
 
-Includes F1 score, accuracy, FPS, and baseline comparison.
+Pixel-level F1 / accuracy / IoU, latency profiling, and a helper to compare
+against baseline numbers you supply. (These are segmentation-mask metrics, not
+the official TuSimple point-based accuracy.)
 """
 
 import numpy as np
@@ -46,8 +48,9 @@ class LaneMetrics:
         Returns:
             F1 score (0-1)
         """
-        pred_binary = (pred_mask > threshold).astype(np.uint8)
-        gt_binary = (gt_mask > threshold).astype(np.uint8)
+        # Boolean masks: `~` on uint8 would flip all bits, not negate
+        pred_binary = np.asarray(pred_mask) > threshold
+        gt_binary = np.asarray(gt_mask) > threshold
 
         tp = np.logical_and(pred_binary, gt_binary).sum()
         fp = np.logical_and(pred_binary, ~gt_binary).sum()
@@ -95,8 +98,9 @@ class LaneMetrics:
         Returns:
             Tuple of (precision, recall)
         """
-        pred_binary = (pred_mask > threshold).astype(np.uint8)
-        gt_binary = (gt_mask > threshold).astype(np.uint8)
+        # Boolean masks: `~` on uint8 would flip all bits, not negate
+        pred_binary = np.asarray(pred_mask) > threshold
+        gt_binary = np.asarray(gt_mask) > threshold
 
         tp = np.logical_and(pred_binary, gt_binary).sum()
         fp = np.logical_and(pred_binary, ~gt_binary).sum()
@@ -199,36 +203,26 @@ class PerformanceProfiler:
 
 
 class BenchmarkComparison:
-    """Compare against baseline models."""
+    """
+    Compare measured metrics against a baseline you measured yourself.
 
-    BASELINE_METRICS = {
-        'baseline_model': {
-            'accuracy': 0.92,
-            'f1_score': 0.85,
-            'fps': 30.0,
-            'latency_ms': 33.3
-        }
-    }
+    No baseline numbers are built in: pass a dict with 'accuracy', 'f1_score'
+    and 'fps' measured for the baseline model on the same data and hardware.
+    """
 
     @staticmethod
     def compare_with_baseline(our_accuracy: float, our_f1: float, our_fps: float,
-                             baseline_name: str = 'baseline_model') -> Dict[str, float]:
+                             baseline: Dict[str, float]) -> Dict[str, float]:
         """
-        Compare our metrics with baseline.
-
         Args:
             our_accuracy: Our model accuracy
             our_f1: Our model F1 score
             our_fps: Our model FPS
-            baseline_name: Name of baseline model
+            baseline: Measured baseline metrics with 'accuracy', 'f1_score', 'fps'
 
         Returns:
             Dictionary with improvement percentages
         """
-        baseline = BenchmarkComparison.BASELINE_METRICS.get(baseline_name)
-        if baseline is None:
-            raise ValueError(f"Unknown baseline: {baseline_name}")
-
         accuracy_improvement = ((our_accuracy - baseline['accuracy']) / baseline['accuracy']) * 100
         f1_improvement = ((our_f1 - baseline['f1_score']) / baseline['f1_score']) * 100
         fps_improvement = ((our_fps - baseline['fps']) / baseline['fps']) * 100
@@ -247,10 +241,10 @@ class BenchmarkComparison:
 
     @staticmethod
     def print_benchmark(our_accuracy: float, our_f1: float, our_fps: float,
-                       baseline_name: str = 'baseline_model') -> None:
+                       baseline: Dict[str, float], baseline_name: str = 'baseline') -> None:
         """Print benchmark comparison."""
         comparison = BenchmarkComparison.compare_with_baseline(
-            our_accuracy, our_f1, our_fps, baseline_name
+            our_accuracy, our_f1, our_fps, baseline
         )
 
         print(f"\n{'='*70}")
@@ -271,11 +265,13 @@ class BenchmarkComparison:
 
 
 if __name__ == '__main__':
-    # Test metrics
+    # Sanity-check the metrics on a hand-built example
     print("Testing LaneMetrics...")
 
-    pred_mask = np.random.rand(384, 640)
-    gt_mask = np.random.rand(384, 640)
+    gt_mask = np.zeros((384, 640))
+    gt_mask[:, 300:310] = 1.0
+    pred_mask = np.zeros((384, 640))
+    pred_mask[:, 302:312] = 0.9
 
     iou = LaneMetrics.iou(pred_mask > 0.5, gt_mask > 0.5)
     f1 = LaneMetrics.f1_score(pred_mask, gt_mask)
@@ -298,12 +294,4 @@ if __name__ == '__main__':
 
     profiler.print_summary()
 
-    # Test benchmark
-    print("\nTesting BenchmarkComparison...")
-    BenchmarkComparison.print_benchmark(
-        our_accuracy=0.99,
-        our_f1=0.95,
-        our_fps=150.0
-    )
-
-    print("All tests passed!")
+    print("Done.")

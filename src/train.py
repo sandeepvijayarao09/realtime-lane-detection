@@ -2,7 +2,7 @@
 Training pipeline for LaneNet.
 
 Features:
-- Mixed precision training with torch.cuda.amp
+- Mixed precision training with torch.amp (CUDA only)
 - Learning rate scheduler (cosine annealing)
 - TensorBoard logging
 - Model checkpointing
@@ -15,15 +15,14 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch.cuda.amp import autocast, GradScaler
 import numpy as np
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Dict, Optional, Tuple
 import argparse
 
-from model import create_lanenet
-from dataset import create_dataloaders
-from metrics import LaneMetrics, PerformanceProfiler
+from .model import create_lanenet
+from .dataset import create_dataloaders
+from .metrics import LaneMetrics, PerformanceProfiler
 
 
 class Trainer:
@@ -40,7 +39,8 @@ class Trainer:
         """
         self.model = model
         self.device = device
-        self.use_amp = use_amp
+        # AMP only helps (and is only supported by GradScaler) on CUDA
+        self.use_amp = use_amp and device.type == 'cuda'
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -48,7 +48,7 @@ class Trainer:
         self.writer = SummaryWriter(self.output_dir / 'logs')
 
         # Mixed precision
-        self.scaler = GradScaler() if use_amp else None
+        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
 
         # Best metrics
         self.best_val_loss = float('inf')
@@ -104,7 +104,7 @@ class Trainer:
 
             # Forward pass with AMP
             if self.use_amp:
-                with autocast():
+                with torch.autocast(device_type='cuda'):
                     outputs = self.model(images)
                     seg_logits = outputs['seg']
                     loss = self.loss_fn(seg_logits, masks)
@@ -164,7 +164,7 @@ class Trainer:
                 masks = batch['mask'].to(self.device)
 
                 if self.use_amp:
-                    with autocast():
+                    with torch.autocast(device_type='cuda'):
                         outputs = self.model(images)
                         seg_logits = outputs['seg']
                         loss = self.loss_fn(seg_logits, masks)
@@ -179,8 +179,9 @@ class Trainer:
                 seg_pred = torch.sigmoid(seg_logits).cpu().numpy()
                 masks_np = masks.cpu().numpy()
 
-                f1 = LaneMetrics.f1_score(seg_pred[0, 0], masks_np[0, 0])
-                acc = LaneMetrics.accuracy(seg_pred[0, 0], masks_np[0, 0])
+                # Pixel-level metrics over every image in the batch
+                f1 = LaneMetrics.f1_score(seg_pred[:, 0], masks_np[:, 0])
+                acc = LaneMetrics.accuracy(seg_pred[:, 0], masks_np[:, 0])
 
                 total_f1 += f1
                 total_acc += acc
@@ -238,7 +239,7 @@ class Trainer:
         Returns:
             Starting epoch
         """
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         epoch = checkpoint['epoch']
@@ -293,8 +294,13 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay')
     parser.add_argument('--output-dir', type=str, default='./outputs', help='Output directory')
-    parser.add_argument('--data-dir', type=str, default='/tmp/lane_data', help='Data directory')
-    parser.add_argument('--use-mock-data', action='store_true', help='Use mock data')
+    parser.add_argument('--data-dir', type=str, default='./data/tusimple',
+                        help='TuSimple train_set directory (with label_data_*.json and clips/)')
+    parser.add_argument('--use-mock-data', action='store_true',
+                        help='Train on synthetic noise images with random lines (smoke test only)')
+    parser.add_argument('--num-workers', type=int, default=2, help='DataLoader workers')
+    parser.add_argument('--no-pretrained', action='store_true',
+                        help='Do not download ImageNet weights for the backbone')
     parser.add_argument('--backbone', type=str, default='efficientnet', help='Backbone')
     parser.add_argument('--device', type=str, default='cuda', help='Device')
 
@@ -306,7 +312,7 @@ def main():
 
     # Create model
     print("Creating model...")
-    model = create_lanenet(backbone=args.backbone, pretrained=True)
+    model = create_lanenet(backbone=args.backbone, pretrained=not args.no_pretrained)
     model = model.to(device)
     model.print_summary()
 
@@ -315,6 +321,7 @@ def main():
     train_loader, val_loader, _ = create_dataloaders(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
+        num_workers=args.num_workers,
         use_mock_data=args.use_mock_data
     )
     print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
