@@ -33,21 +33,39 @@ class ConvBlock(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    """Decoder block with upsampling and skip connections."""
+    """Decoder block: upsample to the skip's resolution, concatenate, refine."""
 
     def __init__(self, in_channels: int, skip_channels: int, out_channels: int):
         super().__init__()
-        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         self.conv1 = ConvBlock(in_channels + skip_channels, out_channels)
         self.conv2 = ConvBlock(out_channels, out_channels)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
-        x = self.upsample(x)
-        # Concatenate skip connection
+        # Resize to the exact skip size so inputs need not be multiples of 32
+        x = F.interpolate(x, size=skip.shape[-2:], mode='bilinear', align_corners=False)
         x = torch.cat([x, skip], dim=1)
         x = self.conv1(x)
         x = self.conv2(x)
         return x
+
+
+# Slices of torchvision's `features` that end at strides 2, 4, 8, 16 and 32.
+# The final 1x1 "head" conv (1280 channels) is deliberately left out.
+ENCODER_STAGES = {
+    'efficientnet': [(0, 2), (2, 3), (3, 4), (4, 6), (6, 8)],
+    'mobilenet': [(0, 2), (2, 4), (4, 7), (7, 14), (14, 18)],
+}
+
+
+def _build_backbone(backbone: str, pretrained: bool) -> nn.Module:
+    """Create a torchvision backbone, optionally with ImageNet weights."""
+    if backbone == 'efficientnet':
+        weights = models.EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
+        return models.efficientnet_b0(weights=weights)
+    if backbone == 'mobilenet':
+        weights = models.MobileNet_V2_Weights.IMAGENET1K_V1 if pretrained else None
+        return models.mobilenet_v2(weights=weights)
+    raise ValueError(f"Backbone must be 'efficientnet' or 'mobilenet', got {backbone}")
 
 
 class LaneNet(nn.Module):
@@ -55,10 +73,10 @@ class LaneNet(nn.Module):
     LaneNet for real-time lane detection.
 
     Args:
-        num_classes: Number of lane instances (default: 1 for binary segmentation)
-        backbone: 'efficientnet' or 'mobilenet' (default: 'efficientnet')
-        pretrained: Use pretrained backbone weights (default: True)
-        embedding_dim: Dimension of instance embedding (default: 4)
+        num_classes: Number of segmentation output channels (1 = binary lane mask)
+        backbone: 'efficientnet' (EfficientNet-B0) or 'mobilenet' (MobileNetV2)
+        pretrained: Load ImageNet weights for the backbone (downloads on first use)
+        embedding_dim: Dimension of the per-pixel instance embedding
     """
 
     def __init__(self, num_classes: int = 1, backbone: str = 'efficientnet',
@@ -66,27 +84,19 @@ class LaneNet(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
+        self.backbone_name = backbone
 
-        # Load pretrained backbone
-        if backbone == 'efficientnet':
-            base_model = models.efficientnet_b0(pretrained=pretrained)
-            # EfficientNet-B0 has these channel sizes at different depths
-            self.backbone_channels = [16, 24, 40, 80, 320]
-        elif backbone == 'mobilenet':
-            base_model = models.mobilenet_v2(pretrained=pretrained)
-            # MobileNetV2 has different channel organization
-            self.backbone_channels = [16, 24, 32, 96, 320]
-        else:
-            raise ValueError(f"Backbone must be 'efficientnet' or 'mobilenet', got {backbone}")
-
-        # Extract encoder layers from backbone
+        base_model = _build_backbone(backbone, pretrained)
         self._setup_encoder(base_model, backbone)
 
-        # Decoder: progressively upsample and add skip connections
-        self.decoder4 = DecoderBlock(self.backbone_channels[4], self.backbone_channels[3], 256)
-        self.decoder3 = DecoderBlock(256, self.backbone_channels[2], 128)
-        self.decoder2 = DecoderBlock(128, self.backbone_channels[1], 64)
-        self.decoder1 = DecoderBlock(64, self.backbone_channels[0], 32)
+        # Read channel counts and strides off the real encoder instead of hardcoding them
+        self.backbone_channels, self.backbone_strides = self._probe_encoder()
+
+        c0, c1, c2, c3, c4 = self.backbone_channels
+        self.decoder4 = DecoderBlock(c4, c3, 256)
+        self.decoder3 = DecoderBlock(256, c2, 128)
+        self.decoder2 = DecoderBlock(128, c1, 64)
+        self.decoder1 = DecoderBlock(64, c0, 32)
 
         # Final layers
         self.final_conv = ConvBlock(32, 32)
@@ -110,30 +120,41 @@ class LaneNet(nn.Module):
         self._init_weights()
 
     def _setup_encoder(self, base_model: nn.Module, backbone: str) -> None:
-        """Extract and store encoder blocks from backbone."""
-        if backbone == 'efficientnet':
-            self.enc0 = nn.Sequential(base_model.features[0])  # stem
-            self.enc1 = nn.Sequential(base_model.features[1])  # block0
-            self.enc2 = nn.Sequential(base_model.features[2:4])  # blocks1-2
-            self.enc3 = nn.Sequential(base_model.features[4:6])  # blocks3-4
-            self.enc4 = nn.Sequential(base_model.features[6:9])  # blocks5-7
-        else:  # mobilenet
-            self.enc0 = nn.Sequential(base_model.features[0])  # first conv
-            self.enc1 = nn.Sequential(base_model.features[1])  # block0
-            self.enc2 = nn.Sequential(base_model.features[2:4])  # blocks1-2
-            self.enc3 = nn.Sequential(base_model.features[4:7])  # blocks3-5
-            self.enc4 = nn.Sequential(base_model.features[7:])  # blocks6+
+        """Split the backbone into five stages (strides 2, 4, 8, 16, 32)."""
+        features = base_model.features
+        stages = [nn.Sequential(*features[a:b]) for a, b in ENCODER_STAGES[backbone]]
+        self.enc0, self.enc1, self.enc2, self.enc3, self.enc4 = stages
+
+    def encoder_stages(self):
+        return [self.enc0, self.enc1, self.enc2, self.enc3, self.enc4]
+
+    @torch.no_grad()
+    def _probe_encoder(self, size: int = 64):
+        """Run a dummy input through the encoder to get each stage's channels and stride."""
+        was_training = self.training
+        self.eval()
+        x = torch.zeros(1, 3, size, size)
+        channels, strides = [], []
+        for stage in self.encoder_stages():
+            x = stage(x)
+            channels.append(x.shape[1])
+            strides.append(size // x.shape[-1])
+        self.train(was_training)
+        return channels, strides
 
     def _init_weights(self) -> None:
-        """Initialize decoder and head weights."""
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
+        """Initialize decoder and head weights. The (possibly pretrained) encoder is left alone."""
+        new_modules = [self.decoder4, self.decoder3, self.decoder2, self.decoder1,
+                       self.final_conv, self.seg_head, self.emb_head]
+        for module in new_modules:
+            for m in module.modules():
+                if isinstance(m, nn.Conv2d):
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                    if m.bias is not None:
+                        nn.init.constant_(m.bias, 0)
+                elif isinstance(m, nn.BatchNorm2d):
+                    nn.init.constant_(m.weight, 1)
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -147,6 +168,8 @@ class LaneNet(nn.Module):
                 'seg': Segmentation logits (B, 1, H, W)
                 'emb': Instance embeddings (B, embedding_dim, H, W)
         """
+        input_size = x.shape[-2:]
+
         # Encoder with skip connections
         skip0 = self.enc0(x)  # 1/2
         skip1 = self.enc1(skip0)  # 1/4
@@ -160,12 +183,15 @@ class LaneNet(nn.Module):
         dec2 = self.decoder2(dec3, skip1)  # 1/4
         dec1 = self.decoder1(dec2, skip0)  # 1/2
 
-        # Final conv
+        # Final conv and heads run at 1/2 resolution (cheap); outputs are
+        # upsampled to the input size
         x = self.final_conv(dec1)
 
         # Heads
-        seg_logits = self.seg_head(x)
-        embeddings = self.emb_head(x)
+        seg_logits = F.interpolate(self.seg_head(x), size=input_size,
+                                   mode='bilinear', align_corners=False)
+        embeddings = F.interpolate(self.emb_head(x), size=input_size,
+                                   mode='bilinear', align_corners=False)
 
         return {
             'seg': seg_logits,
@@ -183,6 +209,7 @@ class LaneNet(nn.Module):
         print(f"Total Parameters: {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
         print(f"Model Size: {total_params * 4 / (1024**2):.2f} MB (float32)")
+        print(f"Encoder channels: {self.backbone_channels}, strides: {self.backbone_strides}")
         print(f"{'='*60}\n")
 
         # Print layer breakdown
@@ -203,7 +230,7 @@ def create_lanenet(num_classes: int = 1, backbone: str = 'efficientnet',
     Args:
         num_classes: Number of lane instances
         backbone: Backbone architecture ('efficientnet' or 'mobilenet')
-        pretrained: Use pretrained weights
+        pretrained: Load ImageNet weights for the backbone
         embedding_dim: Embedding dimension
 
     Returns:
