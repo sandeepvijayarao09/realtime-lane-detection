@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install (CPU-only PyTorch)
+        run: pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+      - name: Test
+        run: pytest -v
+      - name: Training smoke test on synthetic data
+        run: python -m src.train --use-mock-data --data-dir /tmp/lane_mock --epochs 1 --batch-size 4 --no-pretrained --device cpu --num-workers 0 --output-dir /tmp/lane_out
+      - name: CPU latency (informational)
+        run: python scripts/benchmark_cpu.py --threads 2 --runs 10
