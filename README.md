@@ -1,5 +1,7 @@
 # Real-Time Lane Detection (LaneNet-style, PyTorch)
 
+[![CI](https://github.com/sandeepvijayarao09/realtime-lane-detection/actions/workflows/ci.yml/badge.svg)](https://github.com/sandeepvijayarao09/realtime-lane-detection/actions/workflows/ci.yml)
+
 An encoder-decoder lane segmentation network with an instance-embedding head, a TuSimple data loader, training loop, inference engine and curve-fitting post-processing.
 
 ![LaneNet architecture with real tensor shapes](assets/architecture.png)
